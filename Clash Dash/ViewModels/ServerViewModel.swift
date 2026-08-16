@@ -304,8 +304,8 @@ class ServerViewModel: NSObject, ObservableObject, URLSessionDelegate, URLSessio
             "协议: \(challenge.protectionSpace.protocol.map { $0 } ?? "unknown")"
         ]
         
-        messages.forEach { message in
-            Task { @MainActor in
+        Task { @MainActor in
+            for message in messages {
                 logger.debug(message)
             }
         }
