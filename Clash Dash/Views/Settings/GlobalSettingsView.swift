@@ -113,6 +113,25 @@ struct GlobalSettingsView: View {
     @AppStorage("serverStatusTimeout") private var serverStatusTimeout = 2.0  // 默认2秒
     @State private var showClearCacheAlert = false
     @State private var cloudKitManager: CloudKitManager?
+    @State private var showCloudSyncUnavailableAlert = false
+    
+    /// 防呆：环境不支持 iCloud 时阻止开启同步，并提示用户
+    private var cloudSyncBinding: Binding<Bool> {
+        Binding(
+            get: { enableCloudSync },
+            set: { newValue in
+                guard newValue else {
+                    enableCloudSync = false
+                    return
+                }
+                if CloudKitManager.shared.isICloudAvailable {
+                    enableCloudSync = true
+                } else {
+                    showCloudSyncUnavailableAlert = true
+                }
+            }
+        )
+    }
     
     var body: some View {
         Form {
@@ -260,7 +279,7 @@ struct GlobalSettingsView: View {
                 SettingToggleRow(
                     title: "启用 iCloud 同步",
                     subtitle: "同步服务器配置、全局设置和外观设置到 iCloud",
-                    isOn: $enableCloudSync
+                    isOn: cloudSyncBinding
                 )
                 
                 if enableCloudSync, let cloudKitManager = cloudKitManager {
@@ -296,6 +315,11 @@ struct GlobalSettingsView: View {
             }
         }
         .task {
+            // 防呆：若此前已开启过同步但当前环境不支持 iCloud，自动重置开关，
+            // 避免重新进入页面时再次触发 CloudKit 崩溃
+            if enableCloudSync && !CloudKitManager.shared.isICloudAvailable {
+                enableCloudSync = false
+            }
             guard enableCloudSync else { return }
             if cloudKitManager == nil {
                 cloudKitManager = CloudKitManager.shared
@@ -310,6 +334,11 @@ struct GlobalSettingsView: View {
             Task {
                 await cloudKitManager?.checkICloudStatus()
             }
+        }
+        .alert("无法开启 iCloud 同步", isPresented: $showCloudSyncUnavailableAlert) {
+            Button("知道了", role: .cancel) { }
+        } message: {
+            Text("当前设备环境不支持 iCloud（缺少 iCloud 权限，常见于 LiveContainer 或侧载环境）。该功能仅在 App Store 正常安装并登录 iCloud 后可用。")
         }
     }
 }

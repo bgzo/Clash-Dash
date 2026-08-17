@@ -7,9 +7,17 @@ private let logger = LogManager.shared
 class CloudKitManager: ObservableObject {
     static let shared = CloudKitManager()
     
-    // 是否可用 iCloud（未登录或缺少 iCloud entitlement 时返回 nil）
-    private var isICloudAvailable: Bool {
-        FileManager.default.ubiquityIdentityToken != nil
+    // 是否可用 iCloud。
+    // 注意：不能用 ubiquityIdentityToken / CKContainer 做前置检查，
+    // 无 iCloud 权限的环境（如 LiveContainer）访问它们会直接崩溃（SIGTRAP）。
+    // 因此改为识别侧载环境：LiveContainer 将 guest app 放在 Documents/Applications
+    // 目录下，该环境不授予 iCloud 权限，直接判定不可用，完全不触碰崩溃 API
+    var isICloudAvailable: Bool {
+        let bundlePath = Bundle.main.bundleURL.path
+        if bundlePath.contains("/Documents/Applications/") {
+            return false
+        }
+        return true
     }
     
     // 懒加载容器，避免在无 iCloud entitlement（如 LiveContainer）时初始化即崩溃
