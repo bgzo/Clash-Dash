@@ -17,10 +17,9 @@ public class SharedDataManager {
     }
     
     private init() {
-        guard let userDefaults = UserDefaults(suiteName: appGroupId) else {
-            fatalError("无法访问 App Group")
-        }
-        self.userDefaults = userDefaults
+        // App Group 容器可能不可用（如 LiveContainer 或未配置 App Group 权限时），
+        // 此时降级为标准 UserDefaults，避免 fatalError 崩溃
+        userDefaults = UserDefaults(suiteName: appGroupId) ?? UserDefaults.standard
     }
     
     public func saveClashStatus(

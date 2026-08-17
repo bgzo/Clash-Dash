@@ -6,7 +6,14 @@ private let logger = LogManager.shared
 
 class CloudKitManager: ObservableObject {
     static let shared = CloudKitManager()
-    private let container = CKContainer.default()
+    
+    // 是否可用 iCloud（未登录或缺少 iCloud entitlement 时返回 nil）
+    private var isICloudAvailable: Bool {
+        FileManager.default.ubiquityIdentityToken != nil
+    }
+    
+    // 懒加载容器，避免在无 iCloud entitlement（如 LiveContainer）时初始化即崩溃
+    private lazy var container: CKContainer = CKContainer.default()
     private let defaults = UserDefaults.standard
     private let recordType = "AppData"
     
@@ -79,12 +86,18 @@ class CloudKitManager: ObservableObject {
         syncGlobalSettings = defaults.bool(forKey: "syncGlobalSettings")
         syncServers = defaults.bool(forKey: "syncServers")
         syncAppearance = defaults.bool(forKey: "syncAppearance")
-        Task {
-            await checkICloudStatus()
-        }
+        // 不在初始化时访问 CloudKit，避免无 iCloud entitlement 时崩溃
     }
     
-    private func checkICloudStatus() async {
+    func checkICloudStatus() async {
+        // 先检查 iCloud 是否可用，避免无 entitlement 时访问 CloudKit 崩溃
+        guard isICloudAvailable else {
+            await MainActor.run {
+                iCloudStatus = "iCloud 不可用"
+                logger.warning("iCloud 不可用：未登录或缺少 iCloud 权限")
+            }
+            return
+        }
         do {
             let status = try await container.accountStatus()
             await MainActor.run {
