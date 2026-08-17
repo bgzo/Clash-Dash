@@ -112,9 +112,28 @@ struct GlobalSettingsView: View {
     @AppStorage("allowManualURLTestGroupSwitch") private var allowManualURLTestGroupSwitch = false
     @AppStorage("serverStatusTimeout") private var serverStatusTimeout = 2.0  // 默认2秒
     @State private var showClearCacheAlert = false
-    @State private var showSyncErrorAlert = false
-    @State private var syncErrorMessage = ""
-    @StateObject private var cloudKitManager = CloudKitManager.shared
+    @State private var cloudKitManager: CloudKitManager?
+    @State private var showCloudSyncUnavailableAlert = false
+    
+    /// 防呆：环境不支持 iCloud 时阻止开启同步，并提示用户
+    private var cloudSyncBinding: Binding<Bool> {
+        Binding(
+            get: { enableCloudSync },
+            set: { newValue in
+                guard newValue else {
+                    enableCloudSync = false
+                    return
+                }
+                Task {
+                    if await CloudKitManager.shared.isICloudAvailable() {
+                        enableCloudSync = true
+                    } else {
+                        showCloudSyncUnavailableAlert = true
+                    }
+                }
+            }
+        )
+    }
     
     var body: some View {
         Form {
@@ -258,93 +277,21 @@ struct GlobalSettingsView: View {
                 SectionHeader(title: "缓存管理", systemImage: "internaldrive")
             }
             
-            Section {
-                SettingToggleRow(
-                    title: "启用 iCloud 同步",
-                    subtitle: "同步服务器配置、全局设置和外观设置到 iCloud",
-                    isOn: $enableCloudSync
+            if enableCloudSync, let cloudKitManager = cloudKitManager {
+                // 开启同步后显示完整 Section（含上次同步时间页脚，随同步结果实时刷新）
+                ICloudSyncSection(
+                    cloudKitManager: cloudKitManager,
+                    cloudSyncBinding: cloudSyncBinding
                 )
-                
-                if enableCloudSync {
-                    HStack {
-                        Text("iCloud 状态")
-                        Spacer()
-                        Text(cloudKitManager.iCloudStatus)
-                            .foregroundStyle(.secondary)
-                    }
-                    
+            } else {
+                Section {
                     SettingToggleRow(
-                        title: "同步全局设置",
-                        subtitle: "同步代理切换、排序、测速等全局设置",
-                        isOn: Binding(
-                            get: { cloudKitManager.syncGlobalSettings },
-                            set: { cloudKitManager.setSyncOption(globalSettings: $0) }
-                        )
+                        title: "启用 iCloud 同步",
+                        subtitle: "同步服务器配置、全局设置和外观设置到 iCloud",
+                        isOn: cloudSyncBinding
                     )
-                    
-                    SettingToggleRow(
-                        title: "同步控制器列表",
-                        subtitle: "同步所有控制器配置信息",
-                        isOn: Binding(
-                            get: { cloudKitManager.syncServers },
-                            set: { cloudKitManager.setSyncOption(servers: $0) }
-                        )
-                    )
-                    
-                    SettingToggleRow(
-                        title: "同步外观设置",
-                        subtitle: "同步主题、卡片样式等外观设置",
-                        isOn: Binding(
-                            get: { cloudKitManager.syncAppearance },
-                            set: { cloudKitManager.setSyncOption(appearance: $0) }
-                        )
-                    )
-                    
-                    Button {
-                        Task {
-                            do {
-                                try await cloudKitManager.syncToCloud()
-                            } catch {
-                                syncErrorMessage = error.localizedDescription
-                                showSyncErrorAlert = true
-                            }
-                        }
-                    } label: {
-                        HStack {
-                            Label("立即同步到 iCloud", systemImage: "arrow.clockwise.icloud")
-                            Spacer()
-                            if cloudKitManager.isUploadingSyncing {
-                                ProgressView()
-                            }
-                        }
-                    }
-                    .disabled(cloudKitManager.isUploadingSyncing || cloudKitManager.isDownloadingSyncing || cloudKitManager.iCloudStatus != "可用")
-                    
-                    Button {
-                        Task {
-                            do {
-                                try await cloudKitManager.syncFromCloud()
-                            } catch {
-                                syncErrorMessage = error.localizedDescription
-                                showSyncErrorAlert = true
-                            }
-                        }
-                    } label: {
-                        HStack {
-                            Label("从 iCloud 恢复", systemImage: "icloud.and.arrow.down")
-                            Spacer()
-                            if cloudKitManager.isDownloadingSyncing {
-                                ProgressView()
-                            }
-                        }
-                    }
-                    .disabled(cloudKitManager.isUploadingSyncing || cloudKitManager.isDownloadingSyncing || cloudKitManager.iCloudStatus != "可用")
-                }
-            } header: {
-                SectionHeader(title: "iCloud 同步", systemImage: "icloud")
-            } footer: {
-                if enableCloudSync {
-                    Text("上次同步时间：\(cloudKitManager.lastSyncTime?.formatted() ?? "从未同步")")
+                } header: {
+                    SectionHeader(title: "iCloud 同步", systemImage: "icloud")
                 }
             }
             
@@ -362,11 +309,6 @@ struct GlobalSettingsView: View {
         } message: {
             Text("确定要清除所有已缓存的图标吗？")
         }
-        .alert("同步错误", isPresented: $showSyncErrorAlert) {
-            Button("确定", role: .cancel) { }
-        } message: {
-            Text(syncErrorMessage)
-        }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("SettingsUpdated"))) { _ in
             // 强制视图刷新
             withAnimation {
@@ -374,11 +316,144 @@ struct GlobalSettingsView: View {
                 impact.impactOccurred()
             }
         }
+        .task {
+            // 防呆：若此前已开启过同步但当前环境不支持 iCloud，自动重置开关，
+            // 避免重新进入页面时再次触发 CloudKit 崩溃
+            if enableCloudSync {
+                if !(await CloudKitManager.shared.isICloudAvailable()) {
+                    enableCloudSync = false
+                }
+            }
+            guard enableCloudSync else { return }
+            if cloudKitManager == nil {
+                cloudKitManager = CloudKitManager.shared
+            }
+            await cloudKitManager?.checkICloudStatus()
+        }
+        .onChange(of: enableCloudSync) { newValue in
+            guard newValue else { return }
+            if cloudKitManager == nil {
+                cloudKitManager = CloudKitManager.shared
+            }
+            Task {
+                await cloudKitManager?.checkICloudStatus()
+            }
+        }
+        .alert("无法开启 iCloud 同步", isPresented: $showCloudSyncUnavailableAlert) {
+            Button("知道了", role: .cancel) { }
+        } message: {
+            Text("当前设备环境不支持 iCloud（缺少 iCloud 权限，常见于 LiveContainer 或侧载环境）。该功能仅在 App Store 正常安装并登录 iCloud 后可用。")
+        }
     }
 }
 
 #Preview {
     NavigationStack {
         GlobalSettingsView()
+    }
+}
+
+// MARK: - iCloud 同步子视图
+// 使用 @ObservedObject 观察 CloudKitManager 的发布属性，仅在用户开启同步时创建。
+// 整个 Section（含开关、状态、按钮和页脚）都由本视图渲染，页脚通过 @ObservedObject
+// 实时响应 syncToCloud/syncFromCloud 后的 lastSyncTime 更新，避免显示陈旧值
+private struct ICloudSyncSection: View {
+    @ObservedObject var cloudKitManager: CloudKitManager
+    let cloudSyncBinding: Binding<Bool>
+    @State private var showSyncErrorAlert = false
+    @State private var syncErrorMessage = ""
+    
+    var body: some View {
+        Section {
+            SettingToggleRow(
+                title: "启用 iCloud 同步",
+                subtitle: "同步服务器配置、全局设置和外观设置到 iCloud",
+                isOn: cloudSyncBinding
+            )
+            
+            HStack {
+                Text("iCloud 状态")
+                Spacer()
+                Text(cloudKitManager.iCloudStatus)
+                    .foregroundStyle(.secondary)
+            }
+            
+            SettingToggleRow(
+                title: "同步全局设置",
+                subtitle: "同步代理切换、排序、测速等全局设置",
+                isOn: Binding(
+                    get: { cloudKitManager.syncGlobalSettings },
+                    set: { cloudKitManager.setSyncOption(globalSettings: $0) }
+                )
+            )
+            
+            SettingToggleRow(
+                title: "同步控制器列表",
+                subtitle: "同步所有控制器配置信息",
+                isOn: Binding(
+                    get: { cloudKitManager.syncServers },
+                    set: { cloudKitManager.setSyncOption(servers: $0) }
+                )
+            )
+            
+            SettingToggleRow(
+                title: "同步外观设置",
+                subtitle: "同步主题、卡片样式等外观设置",
+                isOn: Binding(
+                    get: { cloudKitManager.syncAppearance },
+                    set: { cloudKitManager.setSyncOption(appearance: $0) }
+                )
+            )
+            
+            Button {
+                Task {
+                    do {
+                        try await cloudKitManager.syncToCloud()
+                    } catch {
+                        syncErrorMessage = error.localizedDescription
+                        showSyncErrorAlert = true
+                    }
+                }
+            } label: {
+                HStack {
+                    Label("立即同步到 iCloud", systemImage: "arrow.clockwise.icloud")
+                    Spacer()
+                    if cloudKitManager.isUploadingSyncing {
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(cloudKitManager.isUploadingSyncing || cloudKitManager.isDownloadingSyncing || cloudKitManager.iCloudStatus != "可用")
+            
+            Button {
+                Task {
+                    do {
+                        try await cloudKitManager.syncFromCloud()
+                    } catch {
+                        syncErrorMessage = error.localizedDescription
+                        showSyncErrorAlert = true
+                    }
+                }
+            } label: {
+                HStack {
+                    Label("从 iCloud 恢复", systemImage: "icloud.and.arrow.down")
+                    Spacer()
+                    if cloudKitManager.isDownloadingSyncing {
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(cloudKitManager.isUploadingSyncing || cloudKitManager.isDownloadingSyncing || cloudKitManager.iCloudStatus != "可用")
+        } header: {
+            SectionHeader(title: "iCloud 同步", systemImage: "icloud")
+        } footer: {
+            // 页脚随 @ObservedObject 的 lastSyncTime 变化实时刷新
+            Text("上次同步时间：\(cloudKitManager.lastSyncTime?.formatted() ?? "从未同步")")
+        }
+        .alert("同步错误", isPresented: $showSyncErrorAlert) {
+            Button("确定", role: .cancel) { }
+        } message: {
+            Text(syncErrorMessage)
+        }
     }
 } 
