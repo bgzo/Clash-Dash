@@ -7,17 +7,25 @@ private let logger = LogManager.shared
 class CloudKitManager: ObservableObject {
     static let shared = CloudKitManager()
     
-    // 是否可用 iCloud。
-    // 注意：不能用 ubiquityIdentityToken / CKContainer 做前置检查，
-    // 无 iCloud 权限的环境（如 LiveContainer）访问它们会直接崩溃（SIGTRAP）。
-    // 因此改为识别侧载环境：LiveContainer 将 guest app 放在 Documents/Applications
-    // 目录下，该环境不授予 iCloud 权限，直接判定不可用，完全不触碰崩溃 API
-    var isICloudAvailable: Bool {
-        let bundlePath = Bundle.main.bundleURL.path
-        if bundlePath.contains("/Documents/Applications/") {
+    // 快路径启发式：识别侧载环境。LiveContainer 将 guest app 放在 Documents/Applications
+    // 目录下，该环境不授予 iCloud 权限，访问 CloudKit/ubiquity API 会直接崩溃（SIGTRAP），
+    // 因此必须在不触碰任何崩溃 API 的前提下提前拦截
+    private var isSideLoadedEnvironment: Bool {
+        Bundle.main.bundleURL.path.contains("/Documents/Applications/")
+    }
+    
+    // 是否可用 iCloud：路径启发式快路径 + accountStatus() 纵深防御。
+    // 快路径保证侧载环境（如 LiveContainer）不触碰 CloudKit API；其余环境再通过
+    // do/catch 包裹的真实账号状态探测确认，任何异常或非可用状态都视为不可用
+    func isICloudAvailable() async -> Bool {
+        guard !isSideLoadedEnvironment else { return false }
+        do {
+            let status = try await container.accountStatus()
+            return status == .available
+        } catch {
+            logger.error("iCloud 可用性探测失败: \(error.localizedDescription)")
             return false
         }
-        return true
     }
     
     // 懒加载容器，避免在无 iCloud entitlement（如 LiveContainer）时初始化即崩溃
@@ -98,8 +106,9 @@ class CloudKitManager: ObservableObject {
     }
     
     func checkICloudStatus() async {
-        // 先检查 iCloud 是否可用，避免无 entitlement 时访问 CloudKit 崩溃
-        guard isICloudAvailable else {
+        // 先检查 iCloud 是否可用（侧载环境快路径 + accountStatus 纵深防御），
+        // 避免无 entitlement 时访问 CloudKit 崩溃
+        guard await isICloudAvailable() else {
             await MainActor.run {
                 iCloudStatus = "iCloud 不可用"
                 logger.warning("iCloud 不可用：未登录或缺少 iCloud 权限")

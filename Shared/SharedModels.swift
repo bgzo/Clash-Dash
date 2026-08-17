@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+private let sharedDataLogger = Logger(subsystem: "com.mou.ClashDash", category: "SharedDataManager")
 
 // MARK: - 共享的数据管理器
 public class SharedDataManager {
@@ -17,9 +20,14 @@ public class SharedDataManager {
     }
     
     private init() {
-        // App Group 容器可能不可用（如 LiveContainer 或未配置 App Group 权限时），
-        // 此时降级为标准 UserDefaults，避免 fatalError 崩溃
-        userDefaults = UserDefaults(suiteName: appGroupId) ?? UserDefaults.standard
+        if let suiteDefaults = UserDefaults(suiteName: appGroupId) {
+            userDefaults = suiteDefaults
+        } else {
+            // App Group 容器不可用（如 LiveContainer 或未配置 App Group 权限时），
+            // 降级为标准 UserDefaults，避免 fatalError 崩溃，同时输出警告日志便于排查
+            sharedDataLogger.warning("App Group「\(self.appGroupId, privacy: .public)」不可用，已降级使用 UserDefaults.standard（常见于 LiveContainer 或未配置 App Group 权限的环境）")
+            userDefaults = UserDefaults.standard
+        }
     }
     
     public func saveClashStatus(
