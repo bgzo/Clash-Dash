@@ -10,22 +10,8 @@ class CloudKitManager: ObservableObject {
     // 快路径启发式：识别侧载环境。LiveContainer 将 guest app 放在 Documents/Applications
     // 目录下，该环境不授予 iCloud 权限，访问 CloudKit/ubiquity API 会直接崩溃（SIGTRAP），
     // 因此必须在不触碰任何崩溃 API 的前提下提前拦截
-    private var isSideLoadedEnvironment: Bool {
+    var isSideLoadedEnvironment: Bool {
         Bundle.main.bundleURL.path.contains("/Documents/Applications/")
-    }
-    
-    // 是否可用 iCloud：路径启发式快路径 + accountStatus() 纵深防御。
-    // 快路径保证侧载环境（如 LiveContainer）不触碰 CloudKit API；其余环境再通过
-    // do/catch 包裹的真实账号状态探测确认，任何异常或非可用状态都视为不可用
-    func isICloudAvailable() async -> Bool {
-        guard !isSideLoadedEnvironment else { return false }
-        do {
-            let status = try await container.accountStatus()
-            return status == .available
-        } catch {
-            logger.error("iCloud 可用性探测失败: \(error.localizedDescription)")
-            return false
-        }
     }
     
     // 懒加载容器，避免在无 iCloud entitlement（如 LiveContainer）时初始化即崩溃
@@ -106,15 +92,15 @@ class CloudKitManager: ObservableObject {
     }
     
     func checkICloudStatus() async {
-        // 先检查 iCloud 是否可用（侧载环境快路径 + accountStatus 纵深防御），
-        // 避免无 entitlement 时访问 CloudKit 崩溃
-        guard await isICloudAvailable() else {
+        // 快路径：侧载环境（如 LiveContainer）直接判定不可用，避免触碰崩溃 API
+        guard !isSideLoadedEnvironment else {
             await MainActor.run {
                 iCloudStatus = "iCloud 不可用"
                 logger.warning("iCloud 不可用：未登录或缺少 iCloud 权限")
             }
             return
         }
+        // 纵深防御：单次真实探测账号状态，do/catch 兜底，异常一律视为不可用
         do {
             let status = try await container.accountStatus()
             await MainActor.run {
