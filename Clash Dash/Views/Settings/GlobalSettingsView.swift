@@ -139,6 +139,9 @@ struct GlobalSettingsView: View {
                 isCloudSyncPending = true
                 Task {
                     await CloudKitManager.shared.checkICloudStatus()
+                    // 取消令牌守卫：探测期间用户若已关闭开关，setter 会把
+                    // isCloudSyncPending 置 false，此处直接放弃写回，避免覆盖用户的 OFF 意图
+                    guard isCloudSyncPending else { return }
                     let available = CloudKitManager.shared.iCloudStatus == "可用"
                     isCloudSyncPending = false
                     if available {
