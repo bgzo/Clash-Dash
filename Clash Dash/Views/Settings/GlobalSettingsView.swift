@@ -318,25 +318,25 @@ struct GlobalSettingsView: View {
         }
         .task {
             // 防呆：若此前已开启过同步但当前环境不支持 iCloud，自动重置开关，
-            // 避免重新进入页面时再次触发 CloudKit 崩溃
-            if enableCloudSync {
-                if !(await CloudKitManager.shared.isICloudAvailable()) {
-                    enableCloudSync = false
-                }
-            }
+            // 避免重新进入页面时再次触发 CloudKit 崩溃（checkICloudStatus 内部有侧载快路径拦截）
             guard enableCloudSync else { return }
             if cloudKitManager == nil {
                 cloudKitManager = CloudKitManager.shared
             }
             await cloudKitManager?.checkICloudStatus()
+            if cloudKitManager?.iCloudStatus != "可用" {
+                enableCloudSync = false
+            }
         }
         .onChange(of: enableCloudSync) { newValue in
-            guard newValue else { return }
-            if cloudKitManager == nil {
-                cloudKitManager = CloudKitManager.shared
-            }
-            Task {
-                await cloudKitManager?.checkICloudStatus()
+            if newValue {
+                // 开启同步：cloudSyncBinding 已探测过 iCloud 状态，这里只需确保 manager 存在
+                if cloudKitManager == nil {
+                    cloudKitManager = CloudKitManager.shared
+                }
+            } else {
+                // 关闭同步：释放对 CloudKitManager 的持有，避免常驻单例引用
+                cloudKitManager = nil
             }
         }
         .alert("无法开启 iCloud 同步", isPresented: $showCloudSyncUnavailableAlert) {
