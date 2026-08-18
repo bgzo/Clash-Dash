@@ -114,18 +114,34 @@ struct GlobalSettingsView: View {
     @State private var showClearCacheAlert = false
     @State private var cloudKitManager: CloudKitManager?
     @State private var showCloudSyncUnavailableAlert = false
+    @State private var isCloudSyncPending = false  // 异步探测期间的开关缓冲，避免 Toggle 回弹闪烁
     
-    /// 防呆：环境不支持 iCloud 时阻止开启同步，并提示用户
+    /// 防呆：环境不支持 iCloud 时阻止开启同步，并提示用户。
+    /// 侧载环境快路径为同步判断（纯路径检查，不触碰 CloudKit API）；
+    /// 其余环境通过 checkICloudStatus 单次探测 accountStatus 确认可用后才真正开启。
+    /// 探测期间用 isCloudSyncPending 缓冲开关状态（Toggle 立即置 ON），
+    /// 探测失败时回弹到 OFF 并弹窗，避免用户感知到异步等待的闪烁
     private var cloudSyncBinding: Binding<Bool> {
         Binding(
-            get: { enableCloudSync },
+            get: { enableCloudSync || isCloudSyncPending },
             set: { newValue in
                 guard newValue else {
                     enableCloudSync = false
+                    isCloudSyncPending = false
                     return
                 }
+                // 侧载环境（如 LiveContainer）同步拦截，立即弹窗提示
+                if CloudKitManager.shared.isSideLoadedEnvironment {
+                    showCloudSyncUnavailableAlert = true
+                    return
+                }
+                // 乐观更新：Toggle 立即置 ON；单次探测 accountStatus，成功后确认开启
+                isCloudSyncPending = true
                 Task {
-                    if await CloudKitManager.shared.isICloudAvailable() {
+                    await CloudKitManager.shared.checkICloudStatus()
+                    let available = CloudKitManager.shared.iCloudStatus == "可用"
+                    isCloudSyncPending = false
+                    if available {
                         enableCloudSync = true
                     } else {
                         showCloudSyncUnavailableAlert = true
