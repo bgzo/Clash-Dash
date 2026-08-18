@@ -114,7 +114,11 @@ struct GlobalSettingsView: View {
     @State private var showClearCacheAlert = false
     @State private var cloudKitManager: CloudKitManager?
     @State private var showCloudSyncUnavailableAlert = false
-    @State private var isCloudSyncPending = false  // 异步探测期间的开关缓冲，避免 Toggle 回弹闪烁
+    // 异步探测期间的开关缓冲 + 取消令牌（单调递增）。
+    // 布尔令牌存在 ABA 问题（ON→OFF→ON 快速连点时旧 Task 会误判通过），
+    // 改用单调递增 token：每次开启分配新 token，Task 恢复后校验 token 是否仍为自己持有
+    @State private var isCloudSyncPending = false
+    @State private var cloudSyncPendingToken = 0
     
     /// 防呆：环境不支持 iCloud 时阻止开启同步，并提示用户。
     /// 侧载环境快路径为同步判断（纯路径检查，不触碰 CloudKit API）；
@@ -128,6 +132,7 @@ struct GlobalSettingsView: View {
                 guard newValue else {
                     enableCloudSync = false
                     isCloudSyncPending = false
+                    cloudSyncPendingToken += 1  // 使所有 in-flight 探测失效
                     return
                 }
                 // 侧载环境（如 LiveContainer）同步拦截，立即弹窗提示
@@ -137,11 +142,14 @@ struct GlobalSettingsView: View {
                 }
                 // 乐观更新：Toggle 立即置 ON；单次探测 accountStatus，成功后确认开启
                 isCloudSyncPending = true
+                let token = cloudSyncPendingToken + 1
+                cloudSyncPendingToken = token
                 Task {
                     await CloudKitManager.shared.checkICloudStatus()
-                    // 取消令牌守卫：探测期间用户若已关闭开关，setter 会把
-                    // isCloudSyncPending 置 false，此处直接放弃写回，避免覆盖用户的 OFF 意图
-                    guard isCloudSyncPending else { return }
+                    // 取消令牌守卫：若期间用户关闭开关（token 自增）或再次开启
+                    // （token 已分配新值），旧 Task 直接放弃写回，避免覆盖用户意图或
+                    // 用过期结果提交
+                    guard cloudSyncPendingToken == token else { return }
                     let available = CloudKitManager.shared.iCloudStatus == "可用"
                     isCloudSyncPending = false
                     if available {
