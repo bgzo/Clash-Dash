@@ -114,25 +114,59 @@ struct GlobalSettingsView: View {
     @State private var showClearCacheAlert = false
     @State private var cloudKitManager: CloudKitManager?
     @State private var showCloudSyncUnavailableAlert = false
+    // 异步探测期间的开关缓冲 + 取消令牌（单调递增）。
+    // 布尔令牌存在 ABA 问题（ON→OFF→ON 快速连点时旧 Task 会误判通过），
+    // 改用单调递增 token：每次开启分配新 token，Task 恢复后校验 token 是否仍为自己持有。
+    // 探测本身由 .task(id: cloudSyncPendingToken) 结构化并发驱动，
+    // 视图消失时 SwiftUI 自动取消 in-flight 探测，避免向脱离层级的 @State 写入
+    @State private var isCloudSyncPending = false
+    @State private var cloudSyncPendingToken = 0
     
-    /// 防呆：环境不支持 iCloud 时阻止开启同步，并提示用户
+    /// 防呆：环境不支持 iCloud 时阻止开启同步，并提示用户。
+    /// 侧载环境快路径为同步判断（纯路径检查，不触碰 CloudKit API）；
+    /// 其余环境通过 checkICloudStatus 单次探测 accountStatus 确认可用后才真正开启。
+    /// 探测期间用 isCloudSyncPending 缓冲开关状态（Toggle 立即置 ON），
+    /// 探测失败时回弹到 OFF 并弹窗，避免用户感知到异步等待的闪烁
     private var cloudSyncBinding: Binding<Bool> {
         Binding(
-            get: { enableCloudSync },
+            get: { enableCloudSync || isCloudSyncPending },
             set: { newValue in
                 guard newValue else {
                     enableCloudSync = false
+                    isCloudSyncPending = false
+                    cloudSyncPendingToken += 1  // 使所有 in-flight 探测失效
                     return
                 }
-                Task {
-                    if await CloudKitManager.shared.isICloudAvailable() {
-                        enableCloudSync = true
-                    } else {
-                        showCloudSyncUnavailableAlert = true
-                    }
+                // 侧载环境（如 LiveContainer）同步拦截，立即弹窗提示
+                if CloudKitManager.shared.isSideLoadedEnvironment {
+                    showCloudSyncUnavailableAlert = true
+                    return
                 }
+                // 乐观更新：Toggle 立即置 ON；token 自增触发 .task(id:) 重新探测
+                isCloudSyncPending = true
+                cloudSyncPendingToken += 1
             }
         )
+    }
+    
+    /// 探测任务：由 cloudSyncPendingToken 驱动，token 变化时重新执行；
+    /// 视图消失时 SwiftUI 自动取消，配合守卫链（取消检查 + token 匹配）保证写回安全
+    private func runCloudSyncProbe() async {
+        // OFF 时 token 也会自增触发本任务，直接返回
+        guard isCloudSyncPending else { return }
+        let myToken = cloudSyncPendingToken
+        await CloudKitManager.shared.checkICloudStatus()
+        // 守卫 1：视图已消失 / 任务被取消，放弃写回
+        guard !Task.isCancelled else { return }
+        // 守卫 2：探测期间 token 已变化（OFF 或再次 ON），本次结果作废（防 ABA）
+        guard cloudSyncPendingToken == myToken else { return }
+        let available = CloudKitManager.shared.iCloudStatus == "可用"
+        isCloudSyncPending = false
+        if available {
+            enableCloudSync = true
+        } else {
+            showCloudSyncUnavailableAlert = true
+        }
     }
     
     var body: some View {
@@ -318,26 +352,31 @@ struct GlobalSettingsView: View {
         }
         .task {
             // 防呆：若此前已开启过同步但当前环境不支持 iCloud，自动重置开关，
-            // 避免重新进入页面时再次触发 CloudKit 崩溃
-            if enableCloudSync {
-                if !(await CloudKitManager.shared.isICloudAvailable()) {
-                    enableCloudSync = false
-                }
-            }
+            // 避免重新进入页面时再次触发 CloudKit 崩溃（checkICloudStatus 内部有侧载快路径拦截）
             guard enableCloudSync else { return }
             if cloudKitManager == nil {
                 cloudKitManager = CloudKitManager.shared
             }
             await cloudKitManager?.checkICloudStatus()
+            if cloudKitManager?.iCloudStatus != "可用" {
+                enableCloudSync = false
+            }
         }
         .onChange(of: enableCloudSync) { newValue in
-            guard newValue else { return }
-            if cloudKitManager == nil {
-                cloudKitManager = CloudKitManager.shared
+            if newValue {
+                // 开启同步：cloudSyncBinding 已探测过 iCloud 状态，这里只需确保 manager 存在
+                if cloudKitManager == nil {
+                    cloudKitManager = CloudKitManager.shared
+                }
+            } else {
+                // 关闭同步：释放对 CloudKitManager 的持有，避免常驻单例引用
+                cloudKitManager = nil
             }
-            Task {
-                await cloudKitManager?.checkICloudStatus()
-            }
+        }
+        // 探测任务绑定视图生命周期：token 变化时重新探测，视图消失时自动取消，
+        // 避免 in-flight 探测在导航离开后向脱离层级的 @State 写入
+        .task(id: cloudSyncPendingToken) {
+            await runCloudSyncProbe()
         }
         .alert("无法开启 iCloud 同步", isPresented: $showCloudSyncUnavailableAlert) {
             Button("知道了", role: .cancel) { }
